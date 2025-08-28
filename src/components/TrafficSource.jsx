@@ -1,7 +1,6 @@
-// PieChart.jsx
-import { useTheme } from "@mui/material/styles";
-import { ResponsivePie } from "@nivo/pie";
+// src/components/PieChart.jsx
 import React, { useMemo, useState, useEffect, useCallback } from "react";
+import { useTheme } from "@mui/material/styles";
 import {
   Box,
   Stack,
@@ -19,190 +18,32 @@ import {
   MenuItem,
   Button,
 } from "@mui/material";
+import { ResponsivePie } from "@nivo/pie";
 
-/* =========================
-   Helpers
-========================= */
-const n = (v) => (isNaN(+v) ? 0 : +v);
-const pad2 = (x) => String(x).padStart(2, "0");
-const toYMD = (d) =>
-  `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-const formatNumber = (v) =>
-  n(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
-const formatSeconds = (sec) => {
-  const s = Math.floor(n(sec));
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const r = s % 60;
-  if (h > 0) return `${h}h ${m}m ${r}s`;
-  if (m > 0) return `${m}m ${r}s`;
-  return `${r}s`;
-};
+import {
+  n,
+  formatNumber,
+  formatSeconds,
+  METRICS,
+  METRIC_OPTIONS,
+  PERIOD_OPTIONS,
+  PERIOD_TO_KEY,
+  getRangeForPeriod,
+  CHANNEL_OPTIONS,
+  loadTrafficSourceByChannelAndKey,
+} from "./trafficModule";
 
-/* =========================
-   Metrics
-========================= */
-const METRICS = {
-  views: { label: "Views", valueOf: (d) => n(d.views) },
-  estimatedMinutesWatched: {
-    label: "Estimated Minutes",
-    valueOf: (d) => n(d.estimatedMinutesWatched),
-  },
-  averageViewDuration: {
-    label: "Avg View Duration (s)",
-    valueOf: (d) => n(d.averageViewDuration),
-  },
-  averageViewPercentage: {
-    label: "Avg View %",
-    valueOf: (d) => n(d.averageViewPercentage),
-  },
-  engagedViews: { label: "Engaged Views", valueOf: (d) => n(d.engagedViews) },
-};
-
-const METRIC_OPTIONS = [
-  { value: "views", label: METRICS.views.label },
-  {
-    value: "estimatedMinutesWatched",
-    label: METRICS.estimatedMinutesWatched.label,
-  },
-  { value: "averageViewDuration", label: METRICS.averageViewDuration.label },
-  {
-    value: "averageViewPercentage",
-    label: METRICS.averageViewPercentage.label,
-  },
-  { value: "engagedViews", label: METRICS.engagedViews.label },
-];
-
-/* =========================
-   Period options (UI)
-========================= */
-const PERIOD_OPTIONS = [
-  { value: "last7", label: "Last 7 days" },
-  { value: "last28", label: "Last 28 days" },
-  { value: "last90", label: "Last 90 days" },
-  { value: "last365", label: "Last 365 days" },
-  { value: "lifetime", label: "Lifetime" },
-  { value: "y-2025", label: "2025" },
-  { value: "y-2024", label: "2024" },
-  { value: "custom", label: "Custom (date range)" },
-];
-
-// UI period -> key trong tên file TrafficSource.<key>.(js|ts)
-const PERIOD_TO_KEY = {
-  last7: "7d",
-  last28: "28d",
-  last90: "90d",
-  last365: "365d",
-  lifetime: "lifetime",
-  "y-2025": "2025",
-  "y-2024": "2024",
-};
-
-
-
-const _context = require.context(
-  "../data",
-  true,
-  /(^\.\/)?channels\/.*\/traffic_source\/TrafficSource\..*\.(js|ts)$/
-);
-
-// Lưu loader theo path
-const MODULE_LOADERS = {};
-_context.keys().forEach((k) => {
-  MODULE_LOADERS[k] = () => Promise.resolve(_context(k));
-});
-
-// Lấy danh sách "kênh" = thư mục gốc chứa traffic_source (1 tầng)
-function computeChannelsOneLevel() {
-  const set = new Set();
-  for (const rawKey of _context.keys()) {
-    const key = rawKey.replace(/^\.\//, "");
-    // Bắt: channels/<channelRoot>/traffic_source/TrafficSource.<key>.*
-    const m = key.match(
-      /^channels\/([^/]+)\/traffic_source\/TrafficSource\./
-    );
-    if (m && m[1]) set.add(m[1]); 
-  }
-  return Array.from(set).sort((a, b) => a.localeCompare(b));
-}
-
-
-
-// CHỌN 1 TRONG 2 TUỲ THEO CẤU TRÚC CỦA BẠN:
-const CHANNEL_ROOTS = computeChannelsOneLevel(); 
-
-const CHANNEL_OPTIONS = CHANNEL_ROOTS.map((root) => ({
-  value: root,
-  label: root.replace(/\//g, " › "),
-}));
-
-
-async function loadTrafficSourceByChannelAndKey(channelRoot, key) {
-  const channelDir = `channels/${channelRoot}/traffic_source`;
-  const endings = [
-    `${channelDir}/TrafficSource.${key}.js`,
-    `${channelDir}/TrafficSource.${key}.ts`,
-  ];
-
-  for (const [path, loader] of Object.entries(MODULE_LOADERS)) {
-    const normalized = path.replace(/^\.\//, "");
-    if (endings.some((suf) => normalized.endsWith(suf))) {
-      const mod = await loader();
-      const arr = Array.isArray(mod?.default)
-        ? mod.default
-        : Array.isArray(mod?.traffic_source)
-          ? mod.traffic_source
-          : [];
-      return arr;
-    }
-  }
-  throw new Error(
-    `Không tìm thấy TrafficSource.${key}.* trong /src/data/${channelDir}`
-  );
-}
-
-/* =========================
-   Date range từ period
-========================= */
-function getRangeForPeriod(periodValue, now = new Date()) {
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const oneDay = 24 * 60 * 60 * 1000;
-
-  const rangeDays = (days) => {
-    const end = today;
-    const start = new Date(end.getTime() - (days - 1) * oneDay);
-    return { start: toYMD(start), end: toYMD(end) };
-  };
-
-  if (periodValue === "last7") return rangeDays(7);
-  if (periodValue === "last28") return rangeDays(28);
-  if (periodValue === "last90") return rangeDays(90);
-  if (periodValue === "last365") return rangeDays(365);
-  if (periodValue === "lifetime") return { start: null, end: null };
-  if (periodValue.startsWith("y-")) {
-    const y = Number(periodValue.split("-")[1]);
-    return { start: `${y}-01-01`, end: `${y}-12-31` };
-  }
-  if (periodValue === "custom") return { start: null, end: null };
-  return { start: null, end: null };
-}
-
-/* =========================
-   Component
-========================= */
 const PieChart = () => {
   const theme = useTheme();
 
   const [metric, setMetric] = useState("views");
   const [period, setPeriod] = useState("last28");
-
-  // Channel: mặc định chọn channel đầu tiên (nếu có)
   const [channel, setChannel] = useState(
     CHANNEL_OPTIONS.length ? CHANNEL_OPTIONS[0].value : ""
   );
 
   const mconf = METRICS[metric];
-  const [tsData, setTsData] = useState([]); // data cho Pie + Table
+  const [tsData, setTsData] = useState([]);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
@@ -210,7 +51,7 @@ const PieChart = () => {
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
 
-  // --- Backend fetch (custom hoặc fallback) ---
+  // Backend fetch (custom hoặc fallback)
   const fetchRange = useCallback(
     async (start, end) => {
       setLoading(true);
@@ -219,7 +60,6 @@ const PieChart = () => {
         const resp = await fetch("/api/traffic_source/range", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          // Nếu backend cần channel để lọc, gửi kèm:
           body: JSON.stringify({ start, end, channelRoot: channel }),
         });
         if (!resp.ok) {
@@ -227,11 +67,9 @@ const PieChart = () => {
           throw new Error(t || `HTTP ${resp.status}`);
         }
         const data = await resp.json();
-        if (Array.isArray(data)) {
-          setTsData(data);
-        } else if (Array.isArray(data.items)) {
-          setTsData(data.items);
-        } else {
+        if (Array.isArray(data)) setTsData(data);
+        else if (Array.isArray(data.items)) setTsData(data.items);
+        else {
           setTsData([]);
           setErrorMsg("Dữ liệu trả về không đúng định dạng mảng.");
         }
@@ -246,7 +84,7 @@ const PieChart = () => {
     [channel]
   );
 
-  // --- Load từ file local theo channel + period ---
+  // Load từ file local theo channel + period
   const loadPeriodFromFile = useCallback(
     async (periodValue) => {
       if (!channel) {
@@ -259,12 +97,11 @@ const PieChart = () => {
       try {
         const key = PERIOD_TO_KEY[periodValue];
         if (!key) throw new Error("Không có key hợp lệ cho period này.");
-
         const arr = await loadTrafficSourceByChannelAndKey(channel, key);
         setTsData(arr);
       } catch (e) {
         console.warn(
-          `Không đọc được file local cho channel="${channel}", period="${periodValue}". Fallback API.`,
+          `Không đọc file local cho channel="${channel}", period="${periodValue}". Fallback API.`,
           e
         );
         const { start, end } = getRangeForPeriod(periodValue, new Date());
@@ -279,15 +116,13 @@ const PieChart = () => {
   // Reload khi channel hoặc period đổi (trừ custom)
   useEffect(() => {
     if (period === "custom") {
-      setTsData([]); // chờ user chọn range & Apply
+      setTsData([]);
       return;
     }
     loadPeriodFromFile(period);
   }, [period, channel, loadPeriodFromFile]);
 
-  /* =========================
-     PIE DATA
-  ========================= */
+  // PIE DATA
   const pieData = useMemo(() => {
     const src = Array.isArray(tsData) ? tsData : [];
     return src.map((d, i) => {
@@ -303,9 +138,7 @@ const PieChart = () => {
     [pieData]
   );
 
-  /* =========================
-     Tooltip
-  ========================= */
+  // Tooltip
   const Tooltip = ({ datum }) => {
     const pct =
       pieTotal > 0 ? ((datum.value / pieTotal) * 100).toFixed(1) : "0.0";
@@ -313,8 +146,8 @@ const PieChart = () => {
       metric === "averageViewPercentage"
         ? `${n(datum.value).toFixed(2)}%`
         : metric === "averageViewDuration"
-          ? formatSeconds(datum.value)
-          : formatNumber(datum.value);
+        ? formatSeconds(datum.value)
+        : formatNumber(datum.value);
 
     return (
       <Box
@@ -333,10 +166,11 @@ const PieChart = () => {
             theme.palette.mode === "dark"
               ? "rgba(0,0,0,0.75)"
               : "rgba(255,255,255,0.95)",
-          border: `1px solid ${theme.palette.mode === "dark"
-            ? "rgba(255,255,255,0.12)"
-            : "rgba(0,0,0,0.08)"
-            }`,
+          border: `1px solid ${
+            theme.palette.mode === "dark"
+              ? "rgba(255,255,255,0.12)"
+              : "rgba(0,0,0,0.08)"
+          }`,
         }}
       >
         <div style={{ marginBottom: 4 }}>{datum.label}</div>
@@ -346,9 +180,7 @@ const PieChart = () => {
     );
   };
 
-  /* =========================
-     Center Label
-  ========================= */
+  // Center Label
   const CenterLabel = ({ centerX, centerY }) => (
     <g transform={`translate(${centerX}, ${centerY})`}>
       <text
@@ -382,15 +214,13 @@ const PieChart = () => {
         {metric === "averageViewPercentage"
           ? `${pieTotal.toFixed(2)}`
           : metric === "averageViewDuration"
-            ? formatSeconds(pieTotal)
-            : formatNumber(pieTotal)}
+          ? formatSeconds(pieTotal)
+          : formatNumber(pieTotal)}
       </text>
     </g>
   );
 
-  /* =========================
-     TABLE DATA
-  ========================= */
+  // TABLE DATA
   const { totals, rows } = useMemo(() => {
     const src = Array.isArray(tsData) ? tsData : [];
 
@@ -420,16 +250,14 @@ const PieChart = () => {
 
     const wAvgDur =
       tViews > 0
-        ? rawRows.reduce((s, r) => s + r.averageViewDuration * r.views, 0) /
-        tViews
+        ? rawRows.reduce((s, r) => s + r.averageViewDuration * r.views, 0) / tViews
         : 0;
     const wAvgPct =
       tViews > 0
-        ? rawRows.reduce((s, r) => s + r.averageViewPercentage * r.views, 0) /
-        tViews
+        ? rawRows.reduce((s, r) => s + r.averageViewPercentage * r.views, 0) / tViews
         : 0;
 
-    const rows = rawRows
+    const sortedRows = rawRows
       .map((r) => ({
         ...r,
         viewsPct: tViews > 0 ? (r.views / tViews) * 100 : 0,
@@ -446,27 +274,24 @@ const PieChart = () => {
         averageViewPercentage: wAvgPct,
         engagedViews: tEng,
       },
-      rows,
+      rows: sortedRows,
     };
   }, [tsData, metric]);
 
-  /* =========================
-     Render
-  ========================= */
   return (
     <Stack spacing={1.5}>
+      {/* Controls */}
       <Stack
         direction="row"
         alignItems="center"
         spacing={2}
         sx={{ px: 1, flexWrap: "wrap", rowGap: 1.25 }}
       >
-        {/* Metric selector */}
+        {/* Metric */}
         <FormControl size="small" sx={{ minWidth: 220 }}>
           <InputLabel id="metric-select-label">Metric</InputLabel>
           <Select
             labelId="metric-select-label"
-            id="metric-select"
             value={metric}
             label="Metric"
             onChange={(e) => setMetric(e.target.value)}
@@ -479,12 +304,11 @@ const PieChart = () => {
           </Select>
         </FormControl>
 
-        {/* Period selector */}
+        {/* Period */}
         <FormControl size="small" sx={{ minWidth: 220 }}>
           <InputLabel id="period-select-label">Period</InputLabel>
           <Select
             labelId="period-select-label"
-            id="period-select"
             value={period}
             label="Period"
             onChange={(e) => setPeriod(e.target.value)}
@@ -497,7 +321,7 @@ const PieChart = () => {
           </Select>
         </FormControl>
 
-        {/* Custom date range */}
+        {/* Custom range */}
         {period === "custom" && (
           <Stack direction="row" spacing={1.25} alignItems="center">
             <Box>
@@ -541,12 +365,11 @@ const PieChart = () => {
           </Stack>
         )}
 
-        {/* Channel selector (đẩy sang phải) */}
+        {/* Channel */}
         <FormControl size="small" sx={{ minWidth: 260, ml: "auto" }}>
           <InputLabel id="channel-select-label">Channel</InputLabel>
           <Select
             labelId="channel-select-label"
-            id="channel-select"
             value={channel}
             label="Channel"
             onChange={(e) => setChannel(e.target.value)}
@@ -565,7 +388,6 @@ const PieChart = () => {
           </Select>
         </FormControl>
 
-        {/* Error message */}
         {errorMsg && (
           <Typography variant="body2" color="error">
             {errorMsg}
@@ -573,12 +395,11 @@ const PieChart = () => {
         )}
       </Stack>
 
-
       {/* PIE */}
       <Box sx={{ height: 420 }}>
         <ResponsivePie
           data={pieData}
-          colors={{ scheme: "set2" }}
+          colors={{ scheme: "set3" }}
           borderWidth={1}
           borderColor={{ from: "color", modifiers: [["darker", 0.2]] }}
           margin={{ top: 30, right: 24, bottom: 60, left: 24 }}
@@ -590,8 +411,8 @@ const PieChart = () => {
             metric === "averageViewPercentage"
               ? `${n(v).toFixed(2)}%`
               : metric === "averageViewDuration"
-                ? formatSeconds(v)
-                : formatNumber(v)
+              ? formatSeconds(v)
+              : formatNumber(v)
           }
           sortByValue
           enableArcLinkLabels
@@ -653,10 +474,11 @@ const PieChart = () => {
         elevation={0}
         sx={{
           mt: 1,
-          border: `1px solid ${theme.palette.mode === "dark"
-            ? "rgba(255,255,255,0.12)"
-            : "rgba(0,0,0,0.08)"
-            }`,
+          border: `1px solid ${
+            theme.palette.mode === "dark"
+              ? "rgba(255,255,255,0.12)"
+              : "rgba(0,0,0,0.08)"
+          }`,
           borderRadius: 1.5,
           overflowX: "auto",
         }}
