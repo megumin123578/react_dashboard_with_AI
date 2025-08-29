@@ -18,7 +18,10 @@ import {
   MenuItem,
   Button,
 } from "@mui/material";
+
 import { ResponsivePie } from "@nivo/pie";
+import { ResponsiveLine } from "@nivo/line";
+import { ResponsiveBar } from "@nivo/bar";
 
 import {
   n,
@@ -32,32 +35,39 @@ import {
   CHANNEL_OPTIONS,
   loadTrafficSourceByChannelAndKey,
 } from "./trafficModule";
+import { API_BASE } from "../config";
 
 const PieChart = () => {
   const theme = useTheme();
-
+  
+  // ==== Controls ====
+  const [chartType, setChartType] = useState("pie"); // "pie" | "line" | "bar"
   const [metric, setMetric] = useState("views");
   const [period, setPeriod] = useState("last28");
+  const [interval, setInterval] = useState("daily"); // "daily" | "weekly" | "monthly" | "yearly"
   const [channel, setChannel] = useState(
     CHANNEL_OPTIONS.length ? CHANNEL_OPTIONS[0].value : ""
   );
-
-  const mconf = METRICS[metric];
-  const [tsData, setTsData] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [errorMsg, setErrorMsg] = useState("");
 
   // Custom range
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
 
-  // Backend fetch (custom hoặc fallback)
+  // ==== Data states ====
+  const mconf = METRICS[metric];
+  const [tsData, setTsData] = useState([]); // dữ liệu theo SOURCE cho Pie + cho TABLE
+  const [tsSeries, setTsSeries] = useState([]); // timeseries raw cho Line/Bar: [{bucket, source, ...}]
+
+  const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
+
+  // ====== PIE (local file / fallback API) ======
   const fetchRange = useCallback(
     async (start, end) => {
       setLoading(true);
       setErrorMsg("");
       try {
-        const resp = await fetch("/api/traffic_source/range", {
+        const resp = await fetch(`${API_BASE}/api/traffic_source/range`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ start, end, channelRoot: channel }),
@@ -67,6 +77,7 @@ const PieChart = () => {
           throw new Error(t || `HTTP ${resp.status}`);
         }
         const data = await resp.json();
+        
         if (Array.isArray(data)) setTsData(data);
         else if (Array.isArray(data.items)) setTsData(data.items);
         else {
@@ -84,7 +95,6 @@ const PieChart = () => {
     [channel]
   );
 
-  // Load từ file local theo channel + period
   const loadPeriodFromFile = useCallback(
     async (periodValue) => {
       if (!channel) {
@@ -113,16 +123,81 @@ const PieChart = () => {
     [channel, fetchRange]
   );
 
-  // Reload khi channel hoặc period đổi (trừ custom)
+  // ====== LINE/BAR (Postgres timeseries) ======
+  const fetchTimeseries = useCallback(
+    async (start, end, intervalValue) => {
+      setLoading(true);
+      setErrorMsg("");
+      try {
+        const resp = await fetch(`${API_BASE}/api/traffic_source/timeseries`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            start,
+            end,
+            channelRoot: channel,
+            interval: intervalValue,
+          }),
+        });
+        if (!resp.ok) {
+          const t = await resp.text();
+          throw new Error(t || `HTTP ${resp.status}`);
+        }
+        const data = await resp.json(); // [{bucket, source, views, ...}]
+        console.log("timeseries resp:", data);
+        setTsSeries(Array.isArray(data) ? data : []);
+      } catch (e) {
+        console.error(e);
+        setTsSeries([]);
+        setErrorMsg(e?.message || "Lỗi tải timeseries.");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [channel]
+  );
+
+  // ====== Auto load khi đổi chart/period/channel/interval ======
   useEffect(() => {
-    if (period === "custom") {
-      setTsData([]);
+    if (chartType === "pie") {
+      // Pie: dùng logic cũ
+      if (period === "custom") {
+        setTsData([]);
+        return;
+      }
+      loadPeriodFromFile(period);
       return;
     }
-    loadPeriodFromFile(period);
-  }, [period, channel, loadPeriodFromFile]);
 
-  // PIE DATA
+    // Line/Bar: gọi Postgres timeseries
+    // Lấy range từ preset hoặc custom
+    const { start, end } =
+      period === "custom"
+        ? { start: startDate, end: endDate }
+        : getRangeForPeriod(period, new Date());
+
+    if (period === "custom") {
+      // Chưa chọn đủ ngày -> chờ user nhấn Apply
+      if (!start || !end) return;
+    }
+
+    if (!start || !end) {
+      setErrorMsg("Hãy chọn thời gian hợp lệ.");
+      return;
+    }
+    fetchTimeseries(start, end, interval);
+  }, [
+    chartType,
+    period,
+    channel,
+    interval,
+    startDate,
+    endDate,
+    loadPeriodFromFile,
+    fetchTimeseries,
+  ]);
+
+  // ====== PIE data ======
   const pieData = useMemo(() => {
     const src = Array.isArray(tsData) ? tsData : [];
     return src.map((d, i) => {
@@ -138,8 +213,8 @@ const PieChart = () => {
     [pieData]
   );
 
-  // Tooltip
-  const Tooltip = ({ datum }) => {
+  // ====== Tooltip cho Pie ======
+  const PieTooltip = ({ datum }) => {
     const pct =
       pieTotal > 0 ? ((datum.value / pieTotal) * 100).toFixed(1) : "0.0";
     const fmt =
@@ -174,13 +249,15 @@ const PieChart = () => {
         }}
       >
         <div style={{ marginBottom: 4 }}>{datum.label}</div>
-        <div>{METRICS[metric].label}: {fmt}</div>
+        <div>
+          {METRICS[metric].label}: {fmt}
+        </div>
         <div>%: {pct}%</div>
       </Box>
     );
   };
 
-  // Center Label
+  // ====== Center label cho Pie ======
   const CenterLabel = ({ centerX, centerY }) => (
     <g transform={`translate(${centerX}, ${centerY})`}>
       <text
@@ -220,7 +297,7 @@ const PieChart = () => {
     </g>
   );
 
-  // TABLE DATA
+  // ====== TABLE data (dùng chung cho cả 3 chart) ======
   const { totals, rows } = useMemo(() => {
     const src = Array.isArray(tsData) ? tsData : [];
 
@@ -250,11 +327,13 @@ const PieChart = () => {
 
     const wAvgDur =
       tViews > 0
-        ? rawRows.reduce((s, r) => s + r.averageViewDuration * r.views, 0) / tViews
+        ? rawRows.reduce((s, r) => s + r.averageViewDuration * r.views, 0) /
+          tViews
         : 0;
     const wAvgPct =
       tViews > 0
-        ? rawRows.reduce((s, r) => s + r.averageViewPercentage * r.views, 0) / tViews
+        ? rawRows.reduce((s, r) => s + r.averageViewPercentage * r.views, 0) /
+          tViews
         : 0;
 
     const sortedRows = rawRows
@@ -278,6 +357,97 @@ const PieChart = () => {
     };
   }, [tsData, metric]);
 
+  // ====== Từ tsSeries -> dữ liệu cho Line/Bar + cập nhật tsData để TABLE dùng ======
+
+  // Line series: [{ id: source, data: [{x: 'YYYY-MM-DD', y: number}, ...] }]
+  const lineSeries = useMemo(() => {
+    if (chartType !== "line") return [];
+    const bySource = new Map();
+    for (const it of tsSeries) {
+      const key = it.source || "Unknown";
+      const yVal = METRICS[metric].valueOf(it);
+      if (!bySource.has(key)) bySource.set(key, []);
+      bySource.get(key).push({ x: String(it.bucket), y: n(yVal) });
+    }
+    for (const arr of bySource.values()) {
+      arr.sort((a, b) => new Date(a.x) - new Date(b.x));
+    }
+    return Array.from(bySource.entries()).map(([id, data]) => ({ id, data }));
+  }, [chartType, tsSeries, metric]);
+
+  // Bar: data & keys
+  const barPrep = useMemo(() => {
+    if (chartType !== "bar") return { data: [], keys: [] };
+    const buckets = new Map(); // bucket -> Map(source -> value)
+    const sources = new Set();
+
+    for (const it of tsSeries) {
+      const b = String(it.bucket);
+      const s = it.source || "Unknown";
+      const yVal = n(METRICS[metric].valueOf(it));
+      sources.add(s);
+      if (!buckets.has(b)) buckets.set(b, new Map());
+      buckets.get(b).set(s, (buckets.get(b).get(s) || 0) + yVal);
+    }
+
+    const sortedBuckets = Array.from(buckets.keys()).sort(
+      (a, b) => new Date(a) - new Date(b)
+    );
+    const keys = Array.from(sources.values()).sort();
+    const data = sortedBuckets.map((b) => {
+      const row = { bucket: b };
+      for (const k of keys) row[k] = buckets.get(b).get(k) || 0;
+      return row;
+    });
+    return { data, keys };
+  }, [chartType, tsSeries, metric]);
+
+  // Khi ở Line/Bar: gộp tsSeries theo source -> setTsData để TABLE dùng chung
+  useEffect(() => {
+    if (chartType === "pie") return; // Pie đã có tsData riêng
+    const perSource = new Map();
+    for (const it of tsSeries) {
+      const s = it.source || "Unknown";
+      const cur = perSource.get(s) || {
+        id: s,
+        label: s,
+        views: 0,
+        estimatedMinutesWatched: 0,
+        averageViewDuration_num: 0, // sum(avg * views)
+        averageViewPercentage_num: 0,
+        engagedViews: 0,
+        views_for_avg: 0,
+      };
+      const v = n(it.views);
+      cur.views += v;
+      cur.estimatedMinutesWatched += n(it.estimatedMinutesWatched);
+      cur.engagedViews += n(it.engagedViews);
+      cur.averageViewDuration_num += n(it.averageViewDuration) * v;
+      cur.averageViewPercentage_num += n(it.averageViewPercentage) * v;
+      cur.views_for_avg += v;
+      perSource.set(s, cur);
+    }
+
+    const rowsTot = [];
+    for (const r of perSource.values()) {
+      rowsTot.push({
+        id: r.id,
+        label: r.label,
+        views: r.views,
+        estimatedMinutesWatched: r.estimatedMinutesWatched,
+        averageViewDuration:
+          r.views_for_avg > 0 ? r.averageViewDuration_num / r.views_for_avg : 0,
+        averageViewPercentage:
+          r.views_for_avg > 0
+            ? r.averageViewPercentage_num / r.views_for_avg
+            : 0,
+        engagedViews: r.engagedViews,
+      });
+    }
+    setTsData(rowsTot);
+  }, [chartType, tsSeries]);
+
+  // ====== UI ======
   return (
     <Stack spacing={1.5}>
       {/* Controls */}
@@ -287,6 +457,39 @@ const PieChart = () => {
         spacing={2}
         sx={{ px: 1, flexWrap: "wrap", rowGap: 1.25 }}
       >
+        {/* Chart type */}
+        <FormControl size="small" sx={{ minWidth: 180 }}>
+          <InputLabel id="chart-type-label">Chart</InputLabel>
+          <Select
+            labelId="chart-type-label"
+            value={chartType}
+            label="Chart"
+            onChange={(e) => setChartType(e.target.value)}
+          >
+            <MenuItem value="pie">Pie</MenuItem>
+            <MenuItem value="line">Line</MenuItem>
+            <MenuItem value="bar">Bar</MenuItem>
+          </Select>
+        </FormControl>
+
+        {/* Interval cho Line/Bar */}
+        {chartType !== "pie" && (
+          <FormControl size="small" sx={{ minWidth: 200 }}>
+            <InputLabel id="interval-select-label">Interval</InputLabel>
+            <Select
+              labelId="interval-select-label"
+              value={interval}
+              label="Interval"
+              onChange={(e) => setInterval(e.target.value)}
+            >
+              <MenuItem value="daily">Daily</MenuItem>
+              <MenuItem value="weekly">Weekly</MenuItem>
+              <MenuItem value="monthly">Monthly</MenuItem>
+              <MenuItem value="yearly">Yearly</MenuItem>
+            </Select>
+          </FormControl>
+        )}
+
         {/* Metric */}
         <FormControl size="small" sx={{ minWidth: 220 }}>
           <InputLabel id="metric-select-label">Metric</InputLabel>
@@ -321,7 +524,7 @@ const PieChart = () => {
           </Select>
         </FormControl>
 
-        {/* Custom range */}
+        {/* Custom range (khi Period = custom) */}
         {period === "custom" && (
           <Stack direction="row" spacing={1.25} alignItems="center">
             <Box>
@@ -356,7 +559,12 @@ const PieChart = () => {
                   setErrorMsg("Start date phải <= End date.");
                   return;
                 }
-                fetchRange(startDate, endDate);
+                // Pie: dùng API /range; Line/Bar: dùng /timeseries
+                if (chartType === "pie") {
+                  fetchRange(startDate, endDate);
+                } else {
+                  fetchTimeseries(startDate, endDate, interval);
+                }
               }}
               disabled={loading}
             >
@@ -395,77 +603,180 @@ const PieChart = () => {
         )}
       </Stack>
 
-      {/* PIE */}
+      {/* CHART AREA */}
       <Box sx={{ height: 420 }}>
-        <ResponsivePie
-          data={pieData}
-          colors={{ scheme: "set3" }}
-          borderWidth={1}
-          borderColor={{ from: "color", modifiers: [["darker", 0.2]] }}
-          margin={{ top: 30, right: 24, bottom: 60, left: 24 }}
-          innerRadius={0.55}
-          padAngle={0.7}
-          cornerRadius={3}
-          activeOuterRadiusOffset={8}
-          valueFormat={(v) =>
-            metric === "averageViewPercentage"
-              ? `${n(v).toFixed(2)}%`
-              : metric === "averageViewDuration"
-              ? formatSeconds(v)
-              : formatNumber(v)
-          }
-          sortByValue
-          enableArcLinkLabels
-          arcLinkLabelsSkipAngle={8}
-          arcLinkLabelsTextColor={
-            theme.palette.mode === "dark" ? "#eee" : "#111"
-          }
-          arcLinkLabelsThickness={2}
-          arcLinkLabelsColor={{ from: "color" }}
-          enableArcLabels
-          arcLabelsRadiusOffset={0.42}
-          arcLabelsSkipAngle={10}
-          arcLabelsComponent={() => (
-            <text
-              textAnchor="middle"
-              dominantBaseline="central"
-              style={{
-                fontSize: 10.5,
-                fontWeight: 700,
-                fill:
-                  theme.palette.mode === "dark"
-                    ? "rgba(255,255,255,0.92)"
-                    : "rgba(0,0,0,0.82)",
-                paintOrder: "stroke",
-                strokeWidth: 3,
-                stroke:
-                  theme.palette.mode === "dark"
-                    ? "rgba(0,0,0,0.45)"
-                    : "rgba(255,255,255,0.9)",
-              }}
-            />
-          )}
-          tooltip={Tooltip}
-          theme={{
-            background: "transparent",
-            textColor: theme.palette.mode === "dark" ? "#eee" : "#111",
-          }}
-          motionConfig="gentle"
-          legends={[
-            {
-              anchor: "bottom",
-              direction: "row",
-              translateY: 40,
-              itemWidth: 130,
-              itemHeight: 18,
-              itemsSpacing: 8,
-              symbolSize: 12,
-              symbolShape: "circle",
-              itemTextColor: theme.palette.mode === "dark" ? "#eee" : "#111",
-            },
-          ]}
-          layers={["arcs", "arcLabels", "arcLinkLabels", "legends", CenterLabel]}
-        />
+        {chartType === "pie" && (
+          <ResponsivePie
+            data={pieData}
+            colors={{ scheme: "set3" }}
+            borderWidth={1}
+            borderColor={{ from: "color", modifiers: [["darker", 0.2]] }}
+            margin={{ top: 30, right: 24, bottom: 60, left: 24 }}
+            innerRadius={0.55}
+            padAngle={0.7}
+            cornerRadius={3}
+            activeOuterRadiusOffset={8}
+            valueFormat={(v) =>
+              metric === "averageViewPercentage"
+                ? `${n(v).toFixed(2)}%`
+                : metric === "averageViewDuration"
+                ? formatSeconds(v)
+                : formatNumber(v)
+            }
+            sortByValue
+            enableArcLinkLabels
+            arcLinkLabelsSkipAngle={8}
+            arcLinkLabelsTextColor={
+              theme.palette.mode === "dark" ? "#eee" : "#111"
+            }
+            arcLinkLabelsThickness={2}
+            arcLinkLabelsColor={{ from: "color" }}
+            enableArcLabels
+            arcLabelsRadiusOffset={0.42}
+            arcLabelsSkipAngle={10}
+            arcLabelsComponent={() => (
+              <text
+                textAnchor="middle"
+                dominantBaseline="central"
+                style={{
+                  fontSize: 10.5,
+                  fontWeight: 700,
+                  fill:
+                    theme.palette.mode === "dark"
+                      ? "rgba(255,255,255,0.92)"
+                      : "rgba(0,0,0,0.82)",
+                  paintOrder: "stroke",
+                  strokeWidth: 3,
+                  stroke:
+                    theme.palette.mode === "dark"
+                      ? "rgba(0,0,0,0.45)"
+                      : "rgba(255,255,255,0.9)",
+                }}
+              />
+            )}
+            tooltip={PieTooltip}
+            theme={{
+              background: "transparent",
+              textColor: theme.palette.mode === "dark" ? "#eee" : "#111",
+            }}
+            motionConfig="gentle"
+            legends={[
+              {
+                anchor: "bottom",
+                direction: "row",
+                translateY: 40,
+                itemWidth: 130,
+                itemHeight: 18,
+                itemsSpacing: 8,
+                symbolSize: 12,
+                symbolShape: "circle",
+                itemTextColor: theme.palette.mode === "dark" ? "#eee" : "#111",
+              },
+            ]}
+            layers={["arcs", "arcLabels", "arcLinkLabels", "legends", CenterLabel]}
+          />
+        )}
+
+        {chartType === "line" && (
+          <ResponsiveLine
+            data={lineSeries}
+            margin={{ top: 30, right: 24, bottom: 60, left: 60 }}
+            xScale={{ type: "point" }} // nếu muốn time: chuyển sang type:'time'
+            yScale={{ type: "linear", stacked: false }}
+            axisBottom={{ tickRotation: -30 }}
+            pointSize={6}
+            useMesh
+            legends={[
+              {
+                anchor: "bottom",
+                direction: "row",
+                translateY: 48,
+                itemWidth: 120,
+                itemHeight: 14,
+                symbolSize: 10,
+                symbolShape: "circle",
+              },
+            ]}
+            tooltip={({ point }) => (
+              <Box
+                sx={{
+                  px: 1,
+                  py: 0.5,
+                  borderRadius: 1,
+                  boxShadow: 3,
+                  bgcolor:
+                    theme.palette.mode === "dark"
+                      ? "rgba(0,0,0,0.75)"
+                      : "rgba(255,255,255,0.95)",
+                }}
+              >
+                <div>
+                  <b>{point.serieId}</b>
+                </div>
+                <div>
+                  {String(point.data.xFormatted)} —{" "}
+                  {metric === "averageViewPercentage"
+                    ? `${n(point.data.yFormatted).toFixed(2)}%`
+                    : metric === "averageViewDuration"
+                    ? formatSeconds(point.data.yFormatted)
+                    : formatNumber(point.data.yFormatted)}
+                </div>
+              </Box>
+            )}
+          />
+        )}
+
+        {chartType === "bar" && (
+          <ResponsiveBar
+            data={barPrep.data}
+            keys={barPrep.keys}
+            indexBy="bucket"
+            margin={{ top: 30, right: 24, bottom: 60, left: 60 }}
+            padding={0.2}
+            valueScale={{ type: "linear" }}
+            indexScale={{ type: "band", round: true }}
+            axisBottom={{ tickRotation: -30 }}
+            labelSkipWidth={12}
+            labelSkipHeight={12}
+            legends={[
+              {
+                anchor: "bottom",
+                direction: "row",
+                translateY: 48,
+                itemWidth: 120,
+                itemHeight: 14,
+                symbolSize: 10,
+                symbolShape: "circle",
+              },
+            ]}
+            tooltip={({ id, value, indexValue }) => (
+              <Box
+                sx={{
+                  px: 1,
+                  py: 0.5,
+                  borderRadius: 1,
+                  boxShadow: 3,
+                  bgcolor:
+                    theme.palette.mode === "dark"
+                      ? "rgba(0,0,0,0.75)"
+                      : "rgba(255,255,255,0.95)",
+                }}
+              >
+                <div>
+                  <b>{String(id)}</b>
+                </div>
+                <div>{String(indexValue)}</div>
+                <div>
+                  {metric === "averageViewPercentage"
+                    ? `${n(value).toFixed(2)}%`
+                    : metric === "averageViewDuration"
+                    ? formatSeconds(value)
+                    : formatNumber(value)}
+                </div>
+              </Box>
+            )}
+          />
+        )}
       </Box>
 
       {/* TABLE */}
